@@ -4,16 +4,10 @@ const cheerio = require('cheerio');
 const BASE = 'https://ozoutback.com.au/Ethiopia/flags/';
 const INDEX_URL = BASE + 'index.html';
 
-// Helper: resolve relative URLs
 function resolveUrl(href, base) {
-  try {
-    return new URL(href, base).href;
-  } catch {
-    return null;
-  }
+  try { return new URL(href, base).href; } catch { return null; }
 }
 
-// Extract thumbnail data from the index page
 async function scrapeThumbnails() {
   const { data } = await axios.get(INDEX_URL);
   const $ = cheerio.load(data);
@@ -22,45 +16,50 @@ async function scrapeThumbnails() {
   $('#thumbs figure').each((i, el) => {
     const $a = $(el).find('a');
     const $img = $(el).find('img');
-    const slideHref = $a.attr('href');
-    const thumbSrc = $img.attr('src');
-    const alt = $img.attr('alt') || '';
-
     results.push({
       id: i + 1,
-      alt,
-      slideUrl: resolveUrl(slideHref, BASE),
-      thumbnailUrl: resolveUrl(thumbSrc, BASE),
+      alt: $img.attr('alt') || '',
+      slideUrl: resolveUrl($a.attr('href'), BASE),
+      thumbnailUrl: resolveUrl($img.attr('src'), BASE),
     });
   });
-
   return results;
 }
 
-// Get the full‑size flag image from a slide page
-async function getFullImageUrl(slideUrl) {
+async function scrapeSlide(slideUrl) {
   try {
     const { data } = await axios.get(slideUrl);
     const $ = cheerio.load(data);
-    const imgSrc = $('#flag img').attr('src');
-    if (imgSrc) return resolveUrl(imgSrc, slideUrl);
+
+    // Large flag image
+    const mainImgSrc = $('img.mainImage').attr('src');
+    const fullImageUrl = mainImgSrc ? resolveUrl(mainImgSrc, slideUrl) : null;
+
+    // Historical description
+    const description = $('p#caption').text().trim();
+
+    return { fullImageUrl, description };
   } catch (err) {
-    console.error(`Failed to fetch full image from ${slideUrl}`);
+    return { fullImageUrl: null, description: '' };
   }
-  return null;
 }
 
 module.exports = async (req, res) => {
-  // Optional query parameter: ?full=true to also fetch full images
-  const { full } = req.query;
+  const { full, limit } = req.query;
 
   try {
-    const flags = await scrapeThumbnails();
+    let flags = await scrapeThumbnails();
+
+    if (limit) {
+      flags = flags.slice(0, parseInt(limit));
+    }
 
     if (full === 'true') {
-      // Fetch full images for all flags (parallel, limited to avoid rate issues)
+      // Fetch full image and description for all (or limited) flags
       const promises = flags.map(async (flag) => {
-        flag.fullImageUrl = await getFullImageUrl(flag.slideUrl);
+        const slideData = await scrapeSlide(flag.slideUrl);
+        flag.fullImageUrl = slideData.fullImageUrl;
+        flag.description = slideData.description;
       });
       await Promise.all(promises);
     }
