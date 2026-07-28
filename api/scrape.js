@@ -39,8 +39,14 @@ async function scrapeSlide(slideUrl) {
     const { data } = await axios.get(slideUrl);
     const $ = cheerio.load(data);
 
-    // Main flag image: <img class="mainImage" src="03_eth1875.gif">
-    const mainImgSrc = $('img.mainImage').attr('src');
+    // Try multiple selectors to find the full flag image (robust fallback chain)
+    let mainImgSrc =
+      $('img.mainImage').attr('src') ||          // some slides use class="mainImage"
+      $('#flag img').attr('src') ||               // older structure: <div id="flag"><img ...>
+      $('div.Photo img').attr('src') ||           // common structure: <div class="Photo"><img ...>
+      $('div.fluid.Photo img').attr('src') ||     // more specific fallback
+      $('a[href^="../index.html"] img').attr('src'); // link back to index often wraps the main image
+
     const fullImageUrl = mainImgSrc ? resolveUrl(mainImgSrc, slideUrl) : null;
 
     // Historical description: <p id="caption">...</p>
