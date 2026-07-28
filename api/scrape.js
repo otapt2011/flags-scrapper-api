@@ -39,17 +39,15 @@ async function scrapeSlide(slideUrl) {
     const { data } = await axios.get(slideUrl);
     const $ = cheerio.load(data);
 
-    // Try multiple selectors to find the full flag image (robust fallback chain)
+    // Try multiple selectors to find the full flag image
     let mainImgSrc =
-      $('img.mainImage').attr('src') ||          // some slides use class="mainImage"
-      $('#flag img').attr('src') ||               // older structure: <div id="flag"><img ...>
-      $('div.Photo img').attr('src') ||           // common structure: <div class="Photo"><img ...>
-      $('div.fluid.Photo img').attr('src') ||     // more specific fallback
-      $('a[href^="../index.html"] img').attr('src'); // link back to index often wraps the main image
+      $('img.mainImage').attr('src') ||
+      $('#flag img').attr('src') ||
+      $('div.Photo img').attr('src') ||
+      $('div.fluid.Photo img').attr('src') ||
+      $('a[href^="../index.html"] img').attr('src');
 
     const fullImageUrl = mainImgSrc ? resolveUrl(mainImgSrc, slideUrl) : null;
-
-    // Historical description: <p id="caption">...</p>
     const description = $('p#caption').text().trim();
 
     return { fullImageUrl, description };
@@ -59,13 +57,62 @@ async function scrapeSlide(slideUrl) {
   }
 }
 
+/**
+ * Parse the alt text to extract a "ruler" (state/entity) and a "period" (year/century).
+ * Examples:
+ *   "Ethiopian Empire, 19th Century" -> ruler: "Ethiopian Empire", period: "19th Century"
+ *   "Empire of Ethiopia, 1875"       -> ruler: "Empire of Ethiopia", period: "1875"
+ *   "Abyssinia, Italian East Africa, 1936" -> ruler: "Abyssinia, Italian East Africa", period: "1936"
+ */
+function parseAlt(alt) {
+  if (!alt) return { ruler: '', period: '' };
+  const lastComma = alt.lastIndexOf(',');
+  if (lastComma === -1) {
+    return { ruler: alt.trim(), period: '' };
+  }
+  const ruler = alt.substring(0, lastComma).trim();
+  const period = alt.substring(lastComma + 1).trim();
+  return { ruler, period };
+}
+
+/**
+ * Guess flag colours based on alt text or period.
+ * Default to green-yellow-red; use green-white-red for Italian occupation.
+ */
+function guessFlagColors(alt) {
+  if (alt && /italian/i.test(alt)) {
+    return ['#009246', '#ffffff', '#ce2b37'];
+  }
+  return ['#078930', '#fcdd09', '#da121a'];
+}
+
+// Transform scraped flag object into the flagData structure used by the history page
+function transformFlag(flag) {
+  const { ruler, period } = parseAlt(flag.alt);
+  return {
+    // Fields required by flag history page
+    id: flag.id,
+    period: period,
+    ruler: ruler,
+    emblem: 'none',
+    imageUrl: flag.fullImageUrl || '',        // full image used for display
+    description: flag.description || '',
+    flagColors: guessFlagColors(flag.alt),
+
+    // Extra scraped fields (kept for reference)
+    slideUrl: flag.slideUrl,
+    thumbnailUrl: flag.thumbnailUrl,
+    fullImageUrl: flag.fullImageUrl,
+    alt: flag.alt,
+  };
+}
+
 module.exports = async (req, res) => {
-  // CORS – allow requests from any origin
+  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  // Handle preflight requests
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
@@ -73,15 +120,12 @@ module.exports = async (req, res) => {
   const { full, limit } = req.query;
 
   try {
-    // 1. Get all thumbnails from the index
     let flags = await scrapeThumbnails();
 
-    // 2. Apply limit if provided (e.g., ?limit=20)
     if (limit) {
       flags = flags.slice(0, parseInt(limit));
     }
 
-    // 3. If full data requested, fetch each slide for image & description
     if (full === 'true') {
       const promises = flags.map(async (flag) => {
         const slideData = await scrapeSlide(flag.slideUrl);
@@ -91,11 +135,13 @@ module.exports = async (req, res) => {
       await Promise.all(promises);
     }
 
-    // 4. Return the result
+    // Transform each flag to match the flag history page data structure
+    const transformed = flags.map(transformFlag);
+
     res.status(200).json({
       success: true,
-      count: flags.length,
-      flags,
+      count: transformed.length,
+      flags: transformed,
     });
   } catch (error) {
     console.error('Scraping failed:', error);
