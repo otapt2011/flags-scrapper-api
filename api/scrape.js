@@ -2,8 +2,11 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 
-const BASE = 'https://ozoutback.com.au/Ethiopia/flags/';
-const INDEX_URL = BASE + 'index.html';
+// Build base URL from country name
+function buildBaseUrl(country) {
+  const safeCountry = encodeURIComponent(country);
+  return `https://ozoutback.com.au/${safeCountry}/flags/`;
+}
 
 // Helper: resolve relative URLs to absolute
 function resolveUrl(href, base) {
@@ -15,8 +18,9 @@ function resolveUrl(href, base) {
 }
 
 // Scrape the index page for thumbnail data
-async function scrapeThumbnails() {
-  const { data } = await axios.get(INDEX_URL);
+async function scrapeThumbnails(baseUrl) {
+  const indexUrl = baseUrl + 'index.html';
+  const { data } = await axios.get(indexUrl);
   const $ = cheerio.load(data);
   const results = [];
 
@@ -26,8 +30,8 @@ async function scrapeThumbnails() {
     results.push({
       id: i + 1,
       alt: $img.attr('alt') || '',
-      slideUrl: resolveUrl($a.attr('href'), BASE),
-      thumbnailUrl: resolveUrl($img.attr('src'), BASE),
+      slideUrl: resolveUrl($a.attr('href'), baseUrl),
+      thumbnailUrl: resolveUrl($img.attr('src'), baseUrl),
     });
   });
   return results;
@@ -39,7 +43,6 @@ async function scrapeSlide(slideUrl) {
     const { data } = await axios.get(slideUrl);
     const $ = cheerio.load(data);
 
-    // Try multiple selectors to find the full flag image
     let mainImgSrc =
       $('img.mainImage').attr('src') ||
       $('#flag img').attr('src') ||
@@ -57,49 +60,34 @@ async function scrapeSlide(slideUrl) {
   }
 }
 
-/**
- * Parse the alt text to extract a "ruler" (state/entity) and a "period" (year/century).
- * Examples:
- *   "Ethiopian Empire, 19th Century" -> ruler: "Ethiopian Empire", period: "19th Century"
- *   "Empire of Ethiopia, 1875"       -> ruler: "Empire of Ethiopia", period: "1875"
- *   "Abyssinia, Italian East Africa, 1936" -> ruler: "Abyssinia, Italian East Africa", period: "1936"
- */
+// Parse alt text for ruler and period
 function parseAlt(alt) {
   if (!alt) return { ruler: '', period: '' };
   const lastComma = alt.lastIndexOf(',');
-  if (lastComma === -1) {
-    return { ruler: alt.trim(), period: '' };
-  }
-  const ruler = alt.substring(0, lastComma).trim();
-  const period = alt.substring(lastComma + 1).trim();
-  return { ruler, period };
+  if (lastComma === -1) return { ruler: alt.trim(), period: '' };
+  return {
+    ruler: alt.substring(0, lastComma).trim(),
+    period: alt.substring(lastComma + 1).trim()
+  };
 }
 
-/**
- * Guess flag colours based on alt text or period.
- * Default to green-yellow-red; use green-white-red for Italian occupation.
- */
 function guessFlagColors(alt) {
-  if (alt && /italian/i.test(alt)) {
-    return ['#009246', '#ffffff', '#ce2b37'];
-  }
+  if (alt && /italian/i.test(alt)) return ['#009246', '#ffffff', '#ce2b37'];
   return ['#078930', '#fcdd09', '#da121a'];
 }
 
-// Transform scraped flag object into the flagData structure used by the history page
-function transformFlag(flag) {
+function transformFlag(flag, country) {
   const { ruler, period } = parseAlt(flag.alt);
   return {
-    // Fields required by flag history page
     id: flag.id,
-    period: period,
-    ruler: ruler,
+    country,
+    period,
+    ruler,
     emblem: 'none',
-    imageUrl: flag.fullImageUrl || '',        // full image used for display
+    imageUrl: flag.fullImageUrl || '',
+    imageBlob: null,
     description: flag.description || '',
     flagColors: guessFlagColors(flag.alt),
-
-    // Extra scraped fields (kept for reference)
     slideUrl: flag.slideUrl,
     thumbnailUrl: flag.thumbnailUrl,
     fullImageUrl: flag.fullImageUrl,
@@ -113,41 +101,42 @@ module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
+  if (req.method === 'OPTIONS') return res.status(200).end();
+
+  const { country, full, limit } = req.query;
+
+  if (!country || !/^[a-zA-Z\s\-]+$/.test(country)) {
+    return res.status(400).json({ success: false, error: 'Valid country name required (e.g., Ethiopia)' });
   }
 
-  const { full, limit } = req.query;
+  const baseUrl = buildBaseUrl(country);
 
   try {
-    let flags = await scrapeThumbnails();
+    let flags = await scrapeThumbnails(baseUrl);
+    flags.forEach(f => (f.country = country)); // inject country
 
-    if (limit) {
-      flags = flags.slice(0, parseInt(limit));
-    }
+    if (limit) flags = flags.slice(0, parseInt(limit));
 
     if (full === 'true') {
-      const promises = flags.map(async (flag) => {
-        const slideData = await scrapeSlide(flag.slideUrl);
-        flag.fullImageUrl = slideData.fullImageUrl;
-        flag.description = slideData.description;
-      });
-      await Promise.all(promises);
+      await Promise.all(
+        flags.map(async (flag) => {
+          const slideData = await scrapeSlide(flag.slideUrl);
+          flag.fullImageUrl = slideData.fullImageUrl;
+          flag.description = slideData.description;
+        })
+      );
     }
 
-    // Transform each flag to match the flag history page data structure
-    const transformed = flags.map(transformFlag);
+    const historyFormat = flags.map(f => transformFlag(f, country));
 
     res.status(200).json({
       success: true,
-      count: transformed.length,
-      flags: transformed,
+      count: flags.length,
+      flags,
+      historyFormat,
     });
   } catch (error) {
     console.error('Scraping failed:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 };
